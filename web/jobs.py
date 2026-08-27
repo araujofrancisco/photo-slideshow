@@ -7,13 +7,14 @@ Responsibilities (single responsibility):
   * Run the render in a bounded thread pool so HTTP requests never block, and
     stream live progress back via a callback.
 
-The store is intentionally in-memory (plus on-disk artifacts). For multi-process
-or multi-replica deployments, swap this for Redis/Celery -- the interface
-(``new_job`` / ``start`` / ``get`` / ``list`` / ``delete``) would stay the same.
+The store is backed by a JSON file (``$JOB_DIR/.jobs.json``) so job state
+survives server restarts. For multi-process or multi-replica deployments, swap
+this for Redis/Celery -- the interface stays the same.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import threading
@@ -33,13 +34,19 @@ JOB_ROOT = Path(os.environ.get("JOB_DIR", "jobs")).resolve()
 JOB_ROOT.mkdir(parents=True, exist_ok=True)
 
 MAX_WORKERS = int(os.environ.get("SLIDESHOW_MAX_WORKERS", "2"))
+JOB_TTL_HOURS = int(os.environ.get("SLIDESHOW_JOB_TTL_HOURS", "168"))  # 7 days
+MAX_JOBS = int(os.environ.get("SLIDESHOW_MAX_JOBS", "200"))
+STORE_FILE = JOB_ROOT / ".jobs.json"
+
+# Terminal states -- jobs in these states are eligible for cleanup.
+_TERMINAL_STATES = frozenset({"done", "error", "cancelled"})
 
 
 @dataclass
 class Job:
     id: str
     created_at: float
-    status: str = "queued"  # queued | processing | done | error
+    status: str = "queued"  # queued | processing | done | error | cancelled
     progress: float = 0.0
     options: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
@@ -53,13 +60,47 @@ class Job:
 
 
 class JobStore:
-    def __init__(self) -> None:
+    """JSON-file-backed job store with thread-safe access."""
+
+    def __init__(self, store_file: Path) -> None:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        self._store_file = store_file
+        self._load()
+
+    # -- Persistence --------------------------------------------------------
+
+    def _load(self) -> None:
+        """Load jobs from disk if the store file exists."""
+        if not self._store_file.exists():
+            return
+        try:
+            data = json.loads(self._store_file.read_text(encoding="utf-8"))
+            for raw in data.get("jobs", []):
+                job = Job(
+                    id=raw["id"],
+                    created_at=raw["created_at"],
+                    status=raw.get("status", "queued"),
+                    progress=raw.get("progress", 0.0),
+                    options=raw.get("options", {}),
+                    error=raw.get("error"),
+                    output_file=raw.get("output_file"),
+                )
+                self._jobs[job.id] = job
+        except (json.JSONDecodeError, KeyError):
+            pass  # Corrupted store -- start fresh.
+
+    def _save(self) -> None:
+        """Persist current state to disk (called under lock)."""
+        data = {"jobs": [asdict(j) for j in self._jobs.values()]}
+        self._store_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    # -- CRUD ---------------------------------------------------------------
 
     def add(self, job: Job) -> None:
         with self._lock:
             self._jobs[job.id] = job
+            self._save()
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
@@ -72,18 +113,54 @@ class JobStore:
                 return
             for key, value in changes.items():
                 setattr(job, key, value)
+            self._save()
 
     def remove(self, job_id: str) -> None:
         with self._lock:
             self._jobs.pop(job_id, None)
+            self._save()
 
     def list_jobs(self, limit: int = 50) -> list[Job]:
         with self._lock:
             jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
         return jobs[:limit]
 
+    # -- Cleanup ------------------------------------------------------------
 
-store = JobStore()
+    def cleanup(self) -> int:
+        """Remove old terminal jobs and their disk artifacts.
+
+        Returns the number of jobs removed.
+        """
+        cutoff = time.time() - (JOB_TTL_HOURS * 3600)
+        removed = 0
+        with self._lock:
+            to_delete = [
+                jid
+                for jid, job in self._jobs.items()
+                if job.status in _TERMINAL_STATES and job.created_at < cutoff
+            ]
+            for jid in to_delete:
+                shutil.rmtree(JOB_ROOT / jid, ignore_errors=True)
+                self._jobs.pop(jid, None)
+                removed += 1
+            # Also enforce max jobs limit (oldest terminal first).
+            if len(self._jobs) > MAX_JOBS:
+                terminal = sorted(
+                    [(jid, j) for jid, j in self._jobs.items() if j.status in _TERMINAL_STATES],
+                    key=lambda x: x[1].created_at,
+                )
+                excess = len(self._jobs) - MAX_JOBS
+                for jid, _ in terminal[:excess]:
+                    shutil.rmtree(JOB_ROOT / jid, ignore_errors=True)
+                    self._jobs.pop(jid, None)
+                    removed += 1
+            if removed:
+                self._save()
+        return removed
+
+
+store = JobStore(STORE_FILE)
 
 # Worker pool used to run ffmpeg off the request path.
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -165,13 +242,7 @@ def _build_config(opts: dict[str, Any], in_dir: Path, out_file: Path) -> Config:
 
 
 def run_job(job_id: str, opts: dict[str, Any]) -> None:
-    """Execute the render for ``job_id`` and update its status.
-
-    Intended to run as a background task (anyio/FastAPI ``BackgroundTasks``),
-    which keeps it off the request path while still using a thread that the
-    event loop manages -- important because spawning ffmpeg from a raw
-    ``ThreadPoolExecutor`` worker under an async server can deadlock.
-    """
+    """Execute the render for ``job_id`` and update its status."""
     try:
         in_dir = input_dir_path(job_id)
         images = find_images(in_dir)

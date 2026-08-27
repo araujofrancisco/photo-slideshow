@@ -24,7 +24,7 @@ def _client():
 def _post_render(client, n=2):
     files = [("files", (f"img{i}.png", PNG, "image/png")) for i in range(n)]
     data = {
-        "delay": "1",
+        "delay": "2",
         "transition": "cut",
         "resolution": "320x240",
         "encoder": "auto",

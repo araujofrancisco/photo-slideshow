@@ -10,18 +10,39 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from web import jobs
 
 MAX_FILES = int(os.environ.get("SLIDESHOW_MAX_FILES", "200"))
 MAX_FILE_BYTES = int(os.environ.get("SLIDESHOW_MAX_FILE_BYTES", str(20 * 1024 * 1024)))
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 
 app = FastAPI(title="Photo Slideshow Web", version="1.0.0")
 
+# ---------------------------------------------------------------------------
+# Middleware
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+
+# ---------------------------------------------------------------------------
+# Static files
+# ---------------------------------------------------------------------------
 def _resolve_static_dir() -> Path | None:
     """Locate the built frontend assets.
 
@@ -47,13 +68,21 @@ def _resolve_static_dir() -> Path | None:
 STATIC_DIR = _resolve_static_dir()
 
 
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
 
+# ---------------------------------------------------------------------------
+# API
+# ---------------------------------------------------------------------------
 @app.post("/api/render")
+@limiter.limit("10/minute")
 async def create_render(
+    request: Request,
     files: list[UploadFile] = File(..., description="Image files to include"),
     delay: float = Form(5.0),
     transition: str = Form("cut"),
@@ -90,18 +119,23 @@ async def create_render(
                     status_code=400,
                     detail=f"Unsupported file type: {upload.filename}",
                 )
-            data = await upload.read()
-            if len(data) > MAX_FILE_BYTES:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"File too large: {upload.filename}",
-                )
-            if not data:
-                continue
             safe_name = Path(upload.filename).name
             if not safe_name or safe_name.startswith("."):
                 continue
-            (in_dir / safe_name).write_bytes(data)
+            dest = in_dir / safe_name
+            # Stream upload to disk in chunks to avoid loading entire file into memory.
+            with open(dest, "wb") as out_f:
+                while chunk := await upload.read(64 * 1024):
+                    if out_f.tell() + len(chunk) > MAX_FILE_BYTES:
+                        dest.unlink(missing_ok=True)
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"File too large: {upload.filename}",
+                        )
+                    out_f.write(chunk)
+            if dest.stat().st_size == 0:
+                dest.unlink(missing_ok=True)
+                continue
             saved += 1
     except HTTPException:
         jobs.delete(job.id)
