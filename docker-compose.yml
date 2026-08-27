@@ -1,0 +1,28 @@
+services:
+  slideshow:
+    build:
+      context: .
+      target: backend
+    image: slideshow-web:latest
+    ports:
+      - "28000:8000"
+    environment:
+      - JOB_DIR=/app/jobs
+      # Cap concurrent renders so the host/GPU isn't overloaded.
+      - SLIDESHOW_MAX_WORKERS=2
+    volumes:
+      - jobs_data:/app/jobs
+    # GPU access: requires the NVIDIA Container Toolkit. With it, the app's
+    # auto-detect uses h264_nvenc; without it, it falls back to libx264.
+    # If you don't have the toolkit, remove the whole `deploy` block below to
+    # run CPU-only.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
+
+volumes:
+  jobs_data:

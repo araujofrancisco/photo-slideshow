@@ -1,0 +1,25 @@
+target-version = "py310"
+line-length = 100
+
+[lint]
+select = [
+    "F",     # Pyflakes (unused imports, undefined names)
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "I",     # isort (import sorting)
+    "UP",    # pyupgrade (modern Python idioms)
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # FastAPI dependency injection pattern (File, Form, Query in defaults)
+    "SIM105",  # contextlib.suppress vs try/except/pass — prefer explicit control flow in callbacks
+]
+
+[lint.isort]
+known-first-party = ["slideshow", "web"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

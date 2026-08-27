@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local config & generated output
+.env
+output/
+jobs/
+*.mp4
+photos/
+
+# Frontend build artifacts (regenerable via `npm run build`)
+frontend/node_modules/
+frontend/dist/
+web/static/
