@@ -114,7 +114,7 @@ async def create_render(
     in_dir = jobs.input_dir_path(job.id)
     saved = 0
     try:
-        for upload in files:
+        for idx, upload in enumerate(files):
             if not jobs.allowed_extension(upload.filename or ""):
                 raise HTTPException(
                     status_code=400,
@@ -123,7 +123,9 @@ async def create_render(
             safe_name = Path(upload.filename).name
             if not safe_name or safe_name.startswith("."):
                 continue
-            dest = in_dir / safe_name
+            # Prefix with zero-padded index so natural sort preserves upload order.
+            ordered_name = f"{idx:04d}_{safe_name}"
+            dest = in_dir / ordered_name
             # Stream upload to disk in chunks to avoid loading entire file into memory.
             with open(dest, "wb") as out_f:
                 while chunk := await upload.read(64 * 1024):
