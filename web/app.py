@@ -127,6 +127,13 @@ async def download_job(job_id: str):
     return FileResponse(job.output_file, media_type="video/mp4", filename=f"{job_id}.mp4")
 
 
+@app.delete("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str):
+    if not jobs.cancel(job_id):
+        raise HTTPException(status_code=404, detail="Job not found or not cancellable.")
+    return {"cancelled": True}
+
+
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str):
     if not jobs.delete(job_id):

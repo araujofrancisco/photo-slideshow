@@ -128,6 +128,21 @@ def delete(job_id: str) -> bool:
     return True
 
 
+def cancel(job_id: str) -> bool:
+    """Mark a queued or processing job as cancelled.
+
+    The ffmpeg process (if running) will finish naturally since we use
+    subprocess.run in a thread, but the UI stops tracking it immediately.
+    """
+    job = store.get(job_id)
+    if job is None:
+        return False
+    if job.status not in ("queued", "processing"):
+        return False
+    store.update(job_id, status="cancelled", error="Cancelled by user")
+    return True
+
+
 def _build_config(opts: dict[str, Any], in_dir: Path, out_file: Path) -> Config:
     resolution = opts.get("resolution") or "1920x1080"
     width, height = parse_resolution(resolution)

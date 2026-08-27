@@ -1,5 +1,6 @@
 ---
 import App from "../components/App.tsx";
+import ThemeToggle from "../components/ThemeToggle.tsx";
 
 const encoderChoices = [
   ["auto", "Auto (GPU if available)"],
@@ -20,6 +21,7 @@ const encoderChoices = [
       :root {
         --bg: #0f172a;
         --card: #1e293b;
+        --input-bg: #0f172a;
         --accent: #6366f1;
         --text: #e2e8f0;
         --muted: #94a3b8;
@@ -30,6 +32,7 @@ const encoderChoices = [
         font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
         background: var(--bg);
         color: var(--text);
+        transition: background 0.3s, color 0.3s;
       }
       .container { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; }
       h1 { margin: 0 0 0.25rem; }
@@ -38,6 +41,7 @@ const encoderChoices = [
     </style>
   </head>
   <body>
+    <ThemeToggle client:load />
     <main class="container">
       <h1>Photo Slideshow Maker</h1>
       <p class="sub">
