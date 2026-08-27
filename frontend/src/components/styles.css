@@ -2,6 +2,15 @@
    Photo Slideshow Maker — Component Styles
    ========================================================================= */
 
+:root {
+  --bg: #0f172a;
+  --card: #1e293b;
+  --input-bg: #0f172a;
+  --accent: #6366f1;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+}
+
 /* Base layout */
 .app {
   display: flex;
