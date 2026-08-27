@@ -21,16 +21,25 @@ interface FileListProps {
   files: File[];
   onReorder: (files: File[]) => void;
   onRemove: (index: number) => void;
+  onImageClick?: (src: string, alt: string) => void;
+  focusedIndex?: number | null;
+  onFocus?: (index: number | null) => void;
 }
 
 function SortableItem({
   file,
   index,
   onRemove,
+  onImageClick,
+  isFocused,
+  onFocus,
 }: {
   file: File;
   index: number;
   onRemove: (i: number) => void;
+  onImageClick?: (src: string, alt: string) => void;
+  isFocused: boolean;
+  onFocus: (index: number | null) => void;
 }) {
   const [preview, setPreview] = useState<string | null>(null);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -53,11 +62,34 @@ function SortableItem({
     <div
       ref={setNodeRef}
       style={style}
-      className={`file-item ${isDragging ? "file-item-dragging" : ""}`}
+      className={`file-item ${isDragging ? "file-item-dragging" : ""} ${isFocused ? "file-item-focused" : ""}`}
       {...attributes}
       {...listeners}
+      tabIndex={0}
+      role="listitem"
+      aria-label={`${file.name}, ${(file.size / 1024).toFixed(0)} KB`}
+      onFocus={() => onFocus(index)}
+      onBlur={() => onFocus(null)}
     >
-      {preview && <img src={preview} alt={file.name} className="file-thumb" />}
+      {preview && (
+        <img
+          src={preview}
+          alt={file.name}
+          className="file-thumb"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (onImageClick && preview) onImageClick(preview, file.name);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && onImageClick && preview) {
+              onImageClick(preview, file.name);
+            }
+          }}
+          tabIndex={0}
+          role="button"
+          aria-label={`Preview ${file.name}`}
+        />
+      )}
       <div className="file-info">
         <span className="file-name" title={file.name}>
           {file.name}
@@ -79,7 +111,14 @@ function SortableItem({
   );
 }
 
-export default function FileList({ files, onReorder, onRemove }: FileListProps) {
+export default function FileList({
+  files,
+  onReorder,
+  onRemove,
+  onImageClick,
+  focusedIndex,
+  onFocus,
+}: FileListProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -105,9 +144,17 @@ export default function FileList({ files, onReorder, onRemove }: FileListProps) 
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={files.map((f, i) => `${f.name}-${i}`)} strategy={rectSortingStrategy}>
-        <div className="file-list">
+        <div className="file-list" role="list" aria-label="Image files">
           {files.map((file, index) => (
-            <SortableItem key={`${file.name}-${index}`} file={file} index={index} onRemove={onRemove} />
+            <SortableItem
+              key={`${file.name}-${index}`}
+              file={file}
+              index={index}
+              onRemove={onRemove}
+              onImageClick={onImageClick}
+              isFocused={focusedIndex === index}
+              onFocus={onFocus || (() => {})}
+            />
           ))}
         </div>
       </SortableContext>

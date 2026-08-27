@@ -236,6 +236,8 @@ def _build_config(opts: dict[str, Any], in_dir: Path, out_file: Path) -> Config:
         overwrite=True,  # per-job output path is unique, safe to overwrite
         ken_burns=ken_burns,
         encoder=str(opts.get("encoder") or "auto"),
+        bitrate=str(opts.get("bitrate") or "auto"),
+        crf=int(opts.get("crf") or 23),
     )
     cfg.validate()
     return cfg

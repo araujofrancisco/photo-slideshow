@@ -101,3 +101,22 @@ export function VideoPreviewModal({ open, onClose, src }: VideoPreviewModalProps
     </Modal>
   );
 }
+
+interface ImagePreviewModalProps {
+  open: boolean;
+  onClose: () => void;
+  src: string | null;
+  alt: string;
+}
+
+export function ImagePreviewModal({ open, onClose, src, alt }: ImagePreviewModalProps) {
+  return (
+    <Modal open={open} onClose={onClose} title="Image Preview">
+      {src ? (
+        <img src={src} alt={alt} className="image-preview" />
+      ) : (
+        <p className="muted">No image available.</p>
+      )}
+    </Modal>
+  );
+}

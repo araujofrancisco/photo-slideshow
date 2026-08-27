@@ -39,6 +39,8 @@ class Config:
     overwrite: bool
     ken_burns: bool
     encoder: str
+    bitrate: str = "auto"  # "auto" or e.g. "8M", "2000k"
+    crf: int = 23  # 0-51, lower = higher quality (auto mode uses encoder default)
 
     def validate(self) -> None:
         """Raise ConfigError if any setting is inconsistent.
@@ -59,6 +61,8 @@ class Config:
             raise ConfigError(
                 "resolution width and height must be even (required by H.264/yuv420p)."
             )
+        if self.crf < 0 or self.crf > 51:
+            raise ConfigError("crf must be between 0 and 51.")
         # Directory existence is validated at scan time (scanner.find_images),
         # keeping this method a pure value check with no filesystem side effects.
 
@@ -131,6 +135,8 @@ def load_config(args, env_file: str = ".env") -> Config:
     overwrite = bool(args.overwrite) or _as_bool(env("OVERWRITE", "false") or "false")
     ken_burns = bool(args.ken_burns) or _as_bool(env("KEN_BURNS", "false") or "false")
     encoder = _pick(args.encoder, env("ENCODER"), "auto")
+    bitrate = _pick(getattr(args, "bitrate", None), env("BITRATE"), "auto")
+    crf = int(_pick(getattr(args, "crf", None), _as_float(env("CRF")), 23))
 
     if input_dir is None:
         raise ConfigError("input directory is required (use --input-dir or set INPUT_DIR in .env).")
@@ -150,6 +156,8 @@ def load_config(args, env_file: str = ".env") -> Config:
         overwrite=overwrite,
         ken_burns=ken_burns,
         encoder=str(encoder).strip(),
+        bitrate=str(bitrate).strip(),
+        crf=crf,
     )
     config.validate()
     return config

@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { ToastProvider, useToast } from "./Toast";
-import { ConfirmModal, VideoPreviewModal } from "./Modal";
+import { ConfirmModal, VideoPreviewModal, ImagePreviewModal } from "./Modal";
 import DropZone from "./DropZone";
 import FileList from "./FileList";
 import { relativeTime, formatDuration } from "../lib/time";
@@ -20,6 +20,8 @@ interface Job {
     resolution?: string;
     ken_burns?: boolean;
     encoder?: string;
+    bitrate?: string;
+    crf?: number;
   };
   error?: string | null;
   download_url?: string | null;
@@ -29,6 +31,13 @@ interface Job {
 interface Props {
   encoderChoices: [string, string][];
 }
+
+const QUALITY_PRESETS = [
+  { label: "Balanced", bitrate: "auto", crf: 23 },
+  { label: "High Quality", bitrate: "auto", crf: 18 },
+  { label: "Small File", bitrate: "auto", crf: 28 },
+  { label: "Custom", bitrate: "custom", crf: -1 },
+];
 
 function AppInner({ encoderChoices }: Props) {
   const { toast } = useToast();
@@ -41,50 +50,111 @@ function AppInner({ encoderChoices }: Props) {
   const [kenBurns, setKenBurns] = useState(false);
   const [encoder, setEncoder] = useState("auto");
 
+  // Quality options
+  const [qualityPreset, setQualityPreset] = useState("auto");
+  const [customBitrate, setCustomBitrate] = useState("8M");
+  const [customCrf, setCustomCrf] = useState(23);
+
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [progress, setProgress] = useState(0);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const pollRef = useRef<number | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   const [deleteTarget, setDeleteTarget] = useState<Job | null>(null);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const [imagePreview, setImagePreview] = useState<{ src: string; alt: string } | null>(null);
 
-  const loadJobs = async () => {
+  // Keyboard navigation state
+  const [focusedFileIndex, setFocusedFileIndex] = useState<number | null>(null);
+
+  const loadJobs = useCallback(async () => {
     try {
       const res = await fetch("/api/jobs");
       if (res.ok) setJobs(await res.json());
     } catch {
       /* ignore */
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadJobs();
     return () => {
-      if (pollRef.current) window.clearInterval(pollRef.current);
+      eventSourceRef.current?.close();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadJobs]);
 
-  const poll = (id: string) => {
-    if (pollRef.current) window.clearInterval(pollRef.current);
-    pollRef.current = window.setInterval(async () => {
-      const res = await fetch(`/api/jobs/${id}`);
-      if (!res.ok) return;
-      const j: Job = await res.json();
-      setStatus(j.status);
-      setProgress(j.progress);
-      if (j.status === "done" || j.status === "error" || j.status === "cancelled") {
-        if (pollRef.current) window.clearInterval(pollRef.current);
-        if (j.status === "done") toast("success", "Render complete!");
-        else if (j.status === "error") toast("error", j.error || "Render failed");
-        else toast("info", "Render cancelled");
-        loadJobs();
+  const subscribeToJob = useCallback((id: string) => {
+    eventSourceRef.current?.close();
+    const es = new EventSource(`/api/jobs/${id}/stream`);
+    eventSourceRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const j: Job = JSON.parse(event.data);
+        if (j.error) {
+          toast("error", j.error);
+          es.close();
+          setStatus(j.status);
+          loadJobs();
+          return;
+        }
+        setStatus(j.status);
+        setProgress(j.progress);
+        if (j.status === "done" || j.status === "error" || j.status === "cancelled") {
+          es.close();
+          if (j.status === "done") toast("success", "Render complete!");
+          else if (j.status === "error") toast("error", j.error || "Render failed");
+          else toast("info", "Render cancelled");
+          loadJobs();
+        }
+      } catch {
+        /* parse error, ignore */
       }
-    }, 1000);
-  };
+    };
+
+    es.onerror = () => {
+      es.close();
+      // Fall back to polling if SSE fails
+      const poll = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/jobs/${id}`);
+          if (!res.ok) return;
+          const j: Job = await res.json();
+          setStatus(j.status);
+          setProgress(j.progress);
+          if (j.status === "done" || j.status === "error" || j.status === "cancelled") {
+            clearInterval(poll);
+            if (j.status === "done") toast("success", "Render complete!");
+            else if (j.status === "error") toast("error", j.error || "Render failed");
+            else toast("info", "Render cancelled");
+            loadJobs();
+          }
+        } catch {
+          /* ignore */
+        }
+      }, 1500);
+    };
+  }, [toast, loadJobs]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Delete" && focusedFileIndex !== null && files.length > 0) {
+        e.preventDefault();
+        setFiles(files.filter((_, idx) => idx !== focusedFileIndex));
+        setFocusedFileIndex(null);
+      }
+      if (e.key === "Escape") {
+        setImagePreview(null);
+        setPreviewSrc(null);
+        setDeleteTarget(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [files, focusedFileIndex]);
 
   const MAX_FILES = 200;
   const MAX_FILE_MB = 20;
@@ -114,6 +184,16 @@ function AppInner({ encoderChoices }: Props) {
     fd.append("ken_burns", String(kenBurns));
     fd.append("encoder", encoder);
 
+    // Quality options
+    const q = QUALITY_PRESETS.find((p) => p.label === qualityPreset);
+    if (q && q.bitrate !== "custom") {
+      fd.append("bitrate", q.bitrate);
+      fd.append("crf", String(q.crf));
+    } else if (q && q.bitrate === "custom") {
+      fd.append("bitrate", customBitrate);
+      fd.append("crf", String(customCrf));
+    }
+
     try {
       const res = await fetch("/api/render", { method: "POST", body: fd });
       if (!res.ok) {
@@ -125,7 +205,7 @@ function AppInner({ encoderChoices }: Props) {
       setStatus("processing");
       setProgress(0);
       setCurrentJobId(data.job_id);
-      poll(data.job_id);
+      subscribeToJob(data.job_id);
     } catch {
       toast("error", "Network error — is the server running?");
     } finally {
@@ -140,9 +220,9 @@ function AppInner({ encoderChoices }: Props) {
   };
 
   const onCancel = async (jobId: string) => {
+    eventSourceRef.current?.close();
     await fetch(`/api/jobs/${jobId}/cancel`, { method: "DELETE" });
     toast("info", "Render cancelled");
-    if (pollRef.current) window.clearInterval(pollRef.current);
     setStatus(null);
     loadJobs();
   };
@@ -160,13 +240,16 @@ function AppInner({ encoderChoices }: Props) {
       : null;
 
   return (
-    <div className="app">
-      <form className="card" onSubmit={onSubmit}>
+    <div className="app" role="main" aria-label="Photo Slideshow Maker">
+      <form className="card" onSubmit={onSubmit} aria-label="Create slideshow">
         <DropZone files={files} onFiles={setFiles} />
         <FileList
           files={files}
           onReorder={setFiles}
           onRemove={(i) => setFiles(files.filter((_, idx) => idx !== i))}
+          onImageClick={(src, alt) => setImagePreview({ src, alt })}
+          focusedIndex={focusedFileIndex}
+          onFocus={setFocusedFileIndex}
         />
 
         <div className="row">
@@ -178,11 +261,12 @@ function AppInner({ encoderChoices }: Props) {
               step={0.1}
               value={delay}
               onChange={(e) => setDelay(Number(e.target.value))}
+              aria-label="Seconds each image is shown"
             />
           </label>
           <label className="field">
             <span>Transition</span>
-            <select value={transition} onChange={(e) => setTransition(e.target.value)}>
+            <select value={transition} onChange={(e) => setTransition(e.target.value)} aria-label="Transition type">
               <option value="cut">Cut</option>
               <option value="crossfade">Crossfade</option>
             </select>
@@ -196,6 +280,7 @@ function AppInner({ encoderChoices }: Props) {
                 step={0.1}
                 value={crossfade}
                 onChange={(e) => setCrossfade(Number(e.target.value))}
+                aria-label="Crossfade duration in seconds"
               />
             </label>
           )}
@@ -204,7 +289,7 @@ function AppInner({ encoderChoices }: Props) {
         <div className="row">
           <label className="field">
             <span>Resolution</span>
-            <select value={resolutionPreset} onChange={(e) => handlePresetChange(e.target.value)}>
+            <select value={resolutionPreset} onChange={(e) => handlePresetChange(e.target.value)} aria-label="Resolution preset">
               {RESOLUTION_PRESETS.map((p) => (
                 <option key={p.value} value={p.value}>
                   {p.label}
@@ -221,12 +306,13 @@ function AppInner({ encoderChoices }: Props) {
                 value={resolution}
                 onChange={(e) => setResolution(e.target.value)}
                 placeholder="1920x1080"
+                aria-label="Custom resolution in WIDTHxHEIGHT format"
               />
             </label>
           )}
           <label className="field">
             <span>Encoder</span>
-            <select value={encoder} onChange={(e) => setEncoder(e.target.value)}>
+            <select value={encoder} onChange={(e) => setEncoder(e.target.value)} aria-label="Video encoder">
               {encoderChoices.map(([val, label]) => (
                 <option key={val} value={val}>
                   {label}
@@ -239,21 +325,65 @@ function AppInner({ encoderChoices }: Props) {
               type="checkbox"
               checked={kenBurns}
               onChange={(e) => setKenBurns(e.target.checked)}
+              aria-label="Enable Ken Burns effect"
             />
             <span>Ken Burns</span>
           </label>
         </div>
 
+        {/* Quality options */}
+        <div className="row">
+          <label className="field">
+            <span>Quality</span>
+            <select
+              value={qualityPreset}
+              onChange={(e) => setQualityPreset(e.target.value)}
+              aria-label="Video quality preset"
+            >
+              {QUALITY_PRESETS.map((p) => (
+                <option key={p.label} value={p.label}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {qualityPreset === "Custom" && (
+            <>
+              <label className="field">
+                <span>Bitrate</span>
+                <input
+                  type="text"
+                  value={customBitrate}
+                  onChange={(e) => setCustomBitrate(e.target.value)}
+                  placeholder="8M"
+                  aria-label="Video bitrate"
+                />
+              </label>
+              <label className="field">
+                <span>CRF (0-51)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={51}
+                  value={customCrf}
+                  onChange={(e) => setCustomCrf(Number(e.target.value))}
+                  aria-label="Constant Rate Factor"
+                />
+              </label>
+            </>
+          )}
+        </div>
+
         {estimatedTime !== null && (
-          <p className="estimate">
+          <p className="estimate" aria-live="polite">
             Estimated render: ~{formatDuration(estimatedTime)}
           </p>
         )}
 
-        <button type="submit" className="primary" disabled={submitting || files.length === 0}>
+        <button type="submit" className="primary" disabled={submitting || files.length === 0} aria-label="Create slideshow">
           {submitting ? (
             <>
-              <span className="spinner" /> Uploading…
+              <span className="spinner" aria-hidden="true" /> Uploading…
             </>
           ) : (
             "Create slideshow"
@@ -262,20 +392,20 @@ function AppInner({ encoderChoices }: Props) {
       </form>
 
       {status && (
-        <div className="card status">
+        <div className="card status" role="status" aria-live="polite" aria-label="Render progress">
           <div className="progress-wrap">
             <div className="progress-label">
               <span>
                 Status: {status}
                 {status === "processing" && currentJobId && (
-                  <button className="btn-cancel" onClick={() => onCancel(currentJobId)}>
+                  <button className="btn-cancel" onClick={() => onCancel(currentJobId)} aria-label="Cancel render">
                     Cancel
                   </button>
                 )}
               </span>
               <span>{Math.round(progress)}%</span>
             </div>
-            <div className="progress-bar">
+            <div className="progress-bar" role="progressbar" aria-valuenow={Math.round(progress)} aria-valuemin={0} aria-valuemax={100}>
               <div
                 className="progress-fill"
                 style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
@@ -289,7 +419,7 @@ function AppInner({ encoderChoices }: Props) {
         <h2>History</h2>
         {jobs.length === 0 && (
           <div className="empty-state">
-            <div className="empty-icon">
+            <div className="empty-icon" aria-hidden="true">
               <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <rect x="2" y="2" width="20" height="20" rx="3" />
                 <path d="M8 16l3-4 2 2 4-5 3 4" />
@@ -299,7 +429,7 @@ function AppInner({ encoderChoices }: Props) {
             <p>No slideshows yet. Upload some images above to get started.</p>
           </div>
         )}
-        <ul className="jobs">
+        <ul className="jobs" aria-label="Job history">
           {jobs.map((j) => (
             <li key={j.id} className="job">
               <div className="job-info">
@@ -307,14 +437,14 @@ function AppInner({ encoderChoices }: Props) {
                   <strong>{j.options.transition || "cut"}</strong> · {j.options.delay ?? 5}s ·{" "}
                   {j.options.resolution || "1920x1080"}
                   {j.options.ken_burns ? " · KB" : ""} ·{" "}
-                  <span className={`status-badge status-${j.status}`}>{j.status}</span>
+                  <span className={`status-badge status-${j.status}`} aria-label={`Status: ${j.status}`}>{j.status}</span>
                 </div>
                 <div className="job-time">{relativeTime(j.created_at)}</div>
                 {j.status === "error" && j.error && <div className="err small">{j.error}</div>}
               </div>
               <div className="job-actions">
                 {j.status === "processing" && (
-                  <button className="btn-cancel" onClick={() => onCancel(j.id)}>
+                  <button className="btn-cancel" onClick={() => onCancel(j.id)} aria-label="Cancel this job">
                     Cancel
                   </button>
                 )}
@@ -323,15 +453,16 @@ function AppInner({ encoderChoices }: Props) {
                     <button
                       className="btn-secondary btn-sm"
                       onClick={() => setPreviewSrc(j.download_url)}
+                      aria-label="Preview video"
                     >
                       Preview
                     </button>
-                    <a href={j.download_url} className="btn-primary btn-sm">
+                    <a href={j.download_url} className="btn-primary btn-sm" aria-label="Download video">
                       Download
                     </a>
                   </>
                 )}
-                <button className="btn-danger-text" onClick={() => setDeleteTarget(j)}>
+                <button className="btn-danger-text" onClick={() => setDeleteTarget(j)} aria-label="Delete job">
                   Delete
                 </button>
               </div>
@@ -354,6 +485,13 @@ function AppInner({ encoderChoices }: Props) {
         open={previewSrc !== null}
         onClose={() => setPreviewSrc(null)}
         src={previewSrc}
+      />
+
+      <ImagePreviewModal
+        open={imagePreview !== null}
+        onClose={() => setImagePreview(null)}
+        src={imagePreview?.src || null}
+        alt={imagePreview?.alt || ""}
       />
     </div>
   );

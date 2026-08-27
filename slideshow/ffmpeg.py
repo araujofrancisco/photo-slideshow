@@ -265,12 +265,37 @@ def build_command(
         "-pix_fmt",
         "yuv420p",  # required for broad player/QuickTime compatibility
         *(["-preset", preset] if preset else []),
+        *(_quality_args(config, enc)),
         "-movflags",
         "+faststart",
         "-y" if config.overwrite else "-n",
         str(config.output_file),
     ]
     return command
+
+
+def _quality_args(config: Config, encoder: str) -> list[str]:
+    """Build bitrate/CRF flags for the selected encoder.
+
+    Hardware encoders (nvenc, qsv, videotoolbox) use -b:v for bitrate.
+    Software encoder (libx264) uses -crf for constant-rate-factor quality.
+    If bitrate is set to "auto", we let the encoder pick its default.
+    """
+    args: list[str] = []
+    bitrate = getattr(config, "bitrate", "auto")
+    crf = getattr(config, "crf", 23)
+
+    if bitrate and bitrate != "auto":
+        args.extend(["-b:v", bitrate])
+    elif encoder == "libx264":
+        # libx264 uses CRF by default; only pass -crf if it differs from the default (23)
+        if crf != 23:
+            args.extend(["-crf", str(crf)])
+    else:
+        # Hardware encoders: use -qp as a fallback quality knob if CRF is non-default
+        if crf != 23:
+            args.extend(["-qp", str(crf)])
+    return args
 
 
 def _total_duration_seconds(config: Config, n_images: int) -> float:

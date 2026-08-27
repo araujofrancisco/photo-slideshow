@@ -12,12 +12,13 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from web import jobs
+from web.sse import job_progress_stream
 
 MAX_FILES = int(os.environ.get("SLIDESHOW_MAX_FILES", "200"))
 MAX_FILE_BYTES = int(os.environ.get("SLIDESHOW_MAX_FILE_BYTES", str(20 * 1024 * 1024)))
@@ -184,6 +185,15 @@ async def delete_job(job_id: str):
     if not jobs.delete(job_id):
         raise HTTPException(status_code=404, detail="Job not found.")
     return {"deleted": True}
+
+
+@app.get("/api/jobs/{job_id}/stream")
+async def stream_job(job_id: str):
+    return StreamingResponse(
+        job_progress_stream(job_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 if STATIC_DIR is not None:
