@@ -44,6 +44,7 @@ function AppInner({ encoderChoices }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [progress, setProgress] = useState(0);
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const pollRef = useRef<number | null>(null);
 
@@ -85,10 +86,22 @@ function AppInner({ encoderChoices }: Props) {
     }, 1000);
   };
 
+  const MAX_FILES = 200;
+  const MAX_FILE_MB = 20;
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (files.length === 0) {
       toast("error", "Please add at least one image.");
+      return;
+    }
+    if (files.length > MAX_FILES) {
+      toast("error", `Too many files (max ${MAX_FILES}).`);
+      return;
+    }
+    const oversized = files.find((f) => f.size > MAX_FILE_MB * 1024 * 1024);
+    if (oversized) {
+      toast("error", `File too large: ${oversized.name} (max ${MAX_FILE_MB}MB).`);
       return;
     }
     setSubmitting(true);
@@ -111,6 +124,7 @@ function AppInner({ encoderChoices }: Props) {
       const data = await res.json();
       setStatus("processing");
       setProgress(0);
+      setCurrentJobId(data.job_id);
       poll(data.job_id);
     } catch {
       toast("error", "Network error — is the server running?");
@@ -253,8 +267,8 @@ function AppInner({ encoderChoices }: Props) {
             <div className="progress-label">
               <span>
                 Status: {status}
-                {status === "processing" && (
-                  <button className="btn-cancel" onClick={() => onCancel(jobs[0]?.id)}>
+                {status === "processing" && currentJobId && (
+                  <button className="btn-cancel" onClick={() => onCancel(currentJobId)}>
                     Cancel
                   </button>
                 )}

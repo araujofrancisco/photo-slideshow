@@ -87,8 +87,6 @@ store = JobStore()
 
 # Worker pool used to run ffmpeg off the request path.
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-# for _ in range(MAX_WORKERS):
-#     executor.submit(lambda: None).result()
 
 
 # --------------------------------------------------------------------------- #

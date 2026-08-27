@@ -47,6 +47,11 @@ def _resolve_static_dir() -> Path | None:
 STATIC_DIR = _resolve_static_dir()
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 @app.post("/api/render")
 async def create_render(
     files: list[UploadFile] = File(..., description="Image files to include"),
@@ -61,6 +66,10 @@ async def create_render(
         raise HTTPException(status_code=400, detail="No files uploaded.")
     if len(files) > MAX_FILES:
         raise HTTPException(status_code=400, detail=f"Too many files (max {MAX_FILES}).")
+    if delay < 0.1 or delay > 300:
+        raise HTTPException(status_code=400, detail="Delay must be between 0.1 and 300 seconds.")
+    if crossfade < 0 or crossfade >= delay:
+        raise HTTPException(status_code=400, detail="Crossfade must be >= 0 and < delay.")
 
     opts = {
         "delay": delay,
@@ -90,6 +99,8 @@ async def create_render(
             if not data:
                 continue
             safe_name = Path(upload.filename).name
+            if not safe_name or safe_name.startswith("."):
+                continue
             (in_dir / safe_name).write_bytes(data)
             saved += 1
     except HTTPException:

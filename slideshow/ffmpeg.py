@@ -294,12 +294,6 @@ def render(
     """
     exe = ffmpeg_exe or find_ffmpeg()
     concrete = resolve_encoder(config.encoder, exe)
-    if not is_encoder_available(concrete, exe):
-        raise RenderError(
-            f"video encoder '{concrete}' is not available in this FFmpeg build. "
-            f"Use 'libx264' or check `ffmpeg -encoders` for hardware options "
-            f"(e.g. h264_nvenc, h264_qsv, h264_vaapi, h264_videotoolbox)."
-        )
     command = build_command(config, images, exe, encoder=concrete)
 
     if progress_callback is None:
