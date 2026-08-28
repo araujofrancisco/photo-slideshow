@@ -2,9 +2,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { ToastProvider, useToast } from "./Toast";
 import { ConfirmModal, VideoPreviewModal, ImagePreviewModal } from "./Modal";
 import DropZone from "./DropZone";
-import FileList from "./FileList";
+import FileList, { type SlideItem } from "./FileList";
 import { relativeTime, formatDuration } from "../lib/time";
-import { RESOLUTION_PRESETS, CUSTOM_PRESET_VALUE, estimateRenderTime } from "../lib/presets";
+import { RESOLUTION_PRESETS, CUSTOM_PRESET_VALUE } from "../lib/presets";
 import "./styles.css";
 
 type JobStatus = "queued" | "processing" | "done" | "error" | "cancelled";
@@ -41,7 +41,7 @@ const QUALITY_PRESETS = [
 
 function AppInner({ encoderChoices }: Props) {
   const { toast } = useToast();
-  const [files, setFiles] = useState<File[]>([]);
+  const [slides, setSlides] = useState<SlideItem[]>([]);
   const [delay, setDelay] = useState(5);
   const [transition, setTransition] = useState("cut");
   const [crossfade, setCrossfade] = useState(1);
@@ -49,6 +49,13 @@ function AppInner({ encoderChoices }: Props) {
   const [resolutionPreset, setResolutionPreset] = useState("1920x1080");
   const [kenBurns, setKenBurns] = useState(false);
   const [encoder, setEncoder] = useState("auto");
+
+  // Background audio
+  const [audio, setAudio] = useState<File | null>(null);
+  const [audioFadeIn, setAudioFadeIn] = useState(1);
+  const [audioFadeOut, setAudioFadeOut] = useState(1);
+  const [audioLoop, setAudioLoop] = useState(false);
+  const [audioNormalize, setAudioNormalize] = useState(false);
 
   // Quality options
   const [qualityPreset, setQualityPreset] = useState("auto");
@@ -141,9 +148,9 @@ function AppInner({ encoderChoices }: Props) {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Delete" && focusedFileIndex !== null && files.length > 0) {
+      if (e.key === "Delete" && focusedFileIndex !== null && slides.length > 0) {
         e.preventDefault();
-        setFiles(files.filter((_, idx) => idx !== focusedFileIndex));
+        setSlides(slides.filter((_, idx) => idx !== focusedFileIndex));
         setFocusedFileIndex(null);
       }
       if (e.key === "Escape") {
@@ -154,35 +161,71 @@ function AppInner({ encoderChoices }: Props) {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [files, focusedFileIndex]);
+  }, [slides, focusedFileIndex]);
 
   const MAX_FILES = 200;
   const MAX_FILE_MB = 20;
 
+  const addSlides = (newFiles: File[]) => {
+    setSlides((prev) => [
+      ...prev,
+      ...newFiles.map((f) => ({ file: f, duration: delay, caption: "" })),
+    ]);
+  };
+
+  const onMetaChange = (index: number, patch: Partial<SlideItem>) => {
+    setSlides((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, ...patch } : s)),
+    );
+  };
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (files.length === 0) {
+    if (slides.length === 0) {
       toast("error", "Please add at least one image.");
       return;
     }
-    if (files.length > MAX_FILES) {
+    if (slides.length > MAX_FILES) {
       toast("error", `Too many files (max ${MAX_FILES}).`);
       return;
     }
-    const oversized = files.find((f) => f.size > MAX_FILE_MB * 1024 * 1024);
+    const oversized = slides.find((s) => s.file.size > MAX_FILE_MB * 1024 * 1024);
     if (oversized) {
-      toast("error", `File too large: ${oversized.name} (max ${MAX_FILE_MB}MB).`);
+      toast("error", `File too large: ${oversized.file.name} (max ${MAX_FILE_MB}MB).`);
       return;
     }
     setSubmitting(true);
     const fd = new FormData();
-    files.forEach((f) => fd.append("files", f));
+    slides.forEach((s) => fd.append("files", s.file));
+
+    // Only send a per-image manifest when any slide diverges from the global
+    // defaults (custom duration or a caption). Otherwise the server falls back
+    // to natural ordering with the global delay.
+    const useItems = slides.some(
+      (s) => s.caption.trim() !== "" || s.duration !== delay,
+    );
+    if (useItems) {
+      const items = slides.map((s, idx) => ({
+        name: `${String(idx).padStart(4, "0")}_${s.file.name}`,
+        duration: s.duration,
+        caption: s.caption.trim() || null,
+      }));
+      fd.append("items", JSON.stringify(items));
+    }
+
     fd.append("delay", String(delay));
     fd.append("transition", transition);
     fd.append("crossfade", String(crossfade));
     fd.append("resolution", resolution);
     fd.append("ken_burns", String(kenBurns));
     fd.append("encoder", encoder);
+    if (audio) {
+      fd.append("audio", audio);
+      fd.append("audio_fade_in", String(audioFadeIn));
+      fd.append("audio_fade_out", String(audioFadeOut));
+      fd.append("audio_loop", String(audioLoop));
+      fd.append("audio_normalize", String(audioNormalize));
+    }
 
     // Quality options
     const q = QUALITY_PRESETS.find((p) => p.label === qualityPreset);
@@ -235,18 +278,27 @@ function AppInner({ encoderChoices }: Props) {
   };
 
   const estimatedTime =
-    files.length > 0
-      ? estimateRenderTime(files.length, delay, transition, crossfade)
+    slides.length > 0
+      ? Math.max(
+          5,
+          (slides.reduce((a, s) => a + s.duration, 0) -
+            (transition === "crossfade"
+              ? (slides.length - 1) * crossfade
+              : 0)) *
+            0.3,
+        )
       : null;
 
   return (
     <div className="app" role="main" aria-label="Photo Slideshow Maker">
       <form className="card" onSubmit={onSubmit} aria-label="Create slideshow">
-        <DropZone files={files} onFiles={setFiles} />
+        <DropZone files={slides.map((s) => s.file)} onFiles={addSlides} />
         <FileList
-          files={files}
-          onReorder={setFiles}
-          onRemove={(i) => setFiles(files.filter((_, idx) => idx !== i))}
+          slides={slides}
+          defaultDuration={delay}
+          onReorder={setSlides}
+          onRemove={(i) => setSlides(slides.filter((_, idx) => idx !== i))}
+          onMetaChange={onMetaChange}
           onImageClick={(src, alt) => setImagePreview({ src, alt })}
           focusedIndex={focusedFileIndex}
           onFocus={setFocusedFileIndex}
@@ -374,13 +426,70 @@ function AppInner({ encoderChoices }: Props) {
           )}
         </div>
 
+        {/* Audio track */}
+        <div className="row audio-row">
+          <label className="field">
+            <span>Background audio</span>
+            <input
+              type="file"
+              accept="audio/*"
+              onChange={(e) => setAudio(e.target.files?.[0] ?? null)}
+              aria-label="Background audio file"
+            />
+          </label>
+          {audio && (
+            <>
+              <label className="field">
+                <span>Fade in (s)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={audioFadeIn}
+                  onChange={(e) => setAudioFadeIn(Number(e.target.value))}
+                  aria-label="Audio fade in seconds"
+                />
+              </label>
+              <label className="field">
+                <span>Fade out (s)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={audioFadeOut}
+                  onChange={(e) => setAudioFadeOut(Number(e.target.value))}
+                  aria-label="Audio fade out seconds"
+                />
+              </label>
+              <label className="field checkbox">
+                <input
+                  type="checkbox"
+                  checked={audioLoop}
+                  onChange={(e) => setAudioLoop(e.target.checked)}
+                  aria-label="Loop audio to fill video"
+                />
+                <span>Loop</span>
+              </label>
+              <label className="field checkbox">
+                <input
+                  type="checkbox"
+                  checked={audioNormalize}
+                  onChange={(e) => setAudioNormalize(e.target.checked)}
+                  aria-label="Normalize audio loudness"
+                />
+                <span>Normalize</span>
+              </label>
+            </>
+          )}
+        </div>
+
         {estimatedTime !== null && (
           <p className="estimate" aria-live="polite">
             Estimated render: ~{formatDuration(estimatedTime)}
           </p>
         )}
 
-        <button type="submit" className="primary" disabled={submitting || files.length === 0} aria-label="Create slideshow">
+        <button type="submit" className="primary" disabled={submitting || slides.length === 0} aria-label="Create slideshow">
           {submitting ? (
             <>
               <span className="spinner" aria-hidden="true" /> Uploading…

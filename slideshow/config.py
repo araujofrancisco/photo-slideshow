@@ -25,6 +25,11 @@ from .errors import ConfigError
 _RESOLUTION_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
 
 
+# Bundled default caption font (permissively licensed DejaVuSans). Resolved at
+# import time so it works whether the package is run from source or installed.
+DEFAULT_FONT_FILE = Path(__file__).parent / "data" / "default.ttf"
+
+
 @dataclass
 class Config:
     """Resolved, validated runtime settings."""
@@ -41,6 +46,18 @@ class Config:
     encoder: str
     bitrate: str = "auto"  # "auto" or e.g. "8M", "2000k"
     crf: int = 23  # 0-51, lower = higher quality (auto mode uses encoder default)
+
+    # Audio track (optional background music).
+    audio_file: Path | None = None
+    audio_fade_in: float = 1.0
+    audio_fade_out: float = 1.0
+    audio_volume: float = 1.0
+    audio_loop: bool = False
+    audio_normalize: bool = False
+
+    # Per-image options.
+    autorotate: bool = True  # honor EXIF orientation so phone photos aren't sideways
+    font_file: Path | None = DEFAULT_FONT_FILE  # font used for caption overlays
 
     def validate(self) -> None:
         """Raise ConfigError if any setting is inconsistent.
@@ -63,6 +80,21 @@ class Config:
             )
         if self.crf < 0 or self.crf > 51:
             raise ConfigError("crf must be between 0 and 51.")
+
+        # Audio validation.
+        if self.audio_file is not None and not Path(self.audio_file).is_file():
+            raise ConfigError(f"audio file not found: {self.audio_file}")
+        if self.audio_fade_in < 0:
+            raise ConfigError("audio_fade_in must be >= 0.")
+        if self.audio_fade_out < 0:
+            raise ConfigError("audio_fade_out must be >= 0.")
+        if self.audio_volume <= 0:
+            raise ConfigError("audio_volume must be greater than 0.")
+
+        # Font validation.
+        if self.font_file is not None and not Path(self.font_file).is_file():
+            raise ConfigError(f"caption font file not found: {self.font_file}")
+
         # Directory existence is validated at scan time (scanner.find_images),
         # keeping this method a pure value check with no filesystem side effects.
 
@@ -138,6 +170,36 @@ def load_config(args, env_file: str = ".env") -> Config:
     bitrate = _pick(getattr(args, "bitrate", None), env("BITRATE"), "auto")
     crf = int(_pick(getattr(args, "crf", None), _as_float(env("CRF")), 23))
 
+    # Audio (background music) options.
+    audio_file = getattr(args, "audio", None) or env("AUDIO_FILE")
+    audio_fade_in = (
+        _as_float(env("AUDIO_FADE_IN", "1.0"))
+        if getattr(args, "audio_fade_in", None) is None
+        else args.audio_fade_in
+    )
+    audio_fade_out = (
+        _as_float(env("AUDIO_FADE_OUT", "1.0"))
+        if getattr(args, "audio_fade_out", None) is None
+        else args.audio_fade_out
+    )
+    audio_volume = (
+        _as_float(env("AUDIO_VOLUME", "1.0"))
+        if getattr(args, "audio_volume", None) is None
+        else args.audio_volume
+    )
+    audio_loop = bool(getattr(args, "audio_loop", False)) or _as_bool(
+        env("AUDIO_LOOP", "false") or "false"
+    )
+    audio_normalize = bool(getattr(args, "audio_normalize", False)) or _as_bool(
+        env("AUDIO_NORMALIZE", "false") or "false"
+    )
+
+    # Per-image options.
+    autorotate = not bool(getattr(args, "no_autorotate", False)) and _as_bool(
+        env("AUTOROTATE", "true") or "true"
+    )
+    font_file = _pick(getattr(args, "font_file", None), env("FONT_FILE"), str(DEFAULT_FONT_FILE))
+
     if input_dir is None:
         raise ConfigError("input directory is required (use --input-dir or set INPUT_DIR in .env).")
     if output_file is None:
@@ -158,6 +220,14 @@ def load_config(args, env_file: str = ".env") -> Config:
         encoder=str(encoder).strip(),
         bitrate=str(bitrate).strip(),
         crf=crf,
+        audio_file=Path(audio_file).expanduser().resolve() if audio_file else None,
+        audio_fade_in=float(audio_fade_in),
+        audio_fade_out=float(audio_fade_out),
+        audio_volume=float(audio_volume),
+        audio_loop=audio_loop,
+        audio_normalize=audio_normalize,
+        autorotate=autorotate,
+        font_file=Path(font_file).expanduser().resolve() if font_file else None,
     )
     config.validate()
     return config

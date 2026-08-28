@@ -30,10 +30,14 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
+from PIL import Image
+
 from .config import Config
-from .errors import FFmpegNotFound, RenderError
+from .errors import CancelError, FFmpegNotFound, RenderError
+from .scanner import MediaItem
 
 # Frame rate used for the generated still frames. Kept constant so that the
 # crossfade filter chain and any zoom/pan animation stay timebase-consistent.
@@ -43,6 +47,22 @@ FPS = 25
 # so it reads as a slow, cinematic drift rather than an aggressive push.
 KB_MAX_ZOOM = 1.12
 KB_ZOOM_RATE = 0.0006  # zoom added per output frame
+
+# EXIF orientation tag id.
+_EXIF_ORIENTATION_TAG = 0x0112
+
+# Map EXIF orientation (1-8) to the ffmpeg filter chain that makes it upright.
+# 1 is already correct; 2-4 are simple flips; 6/8 are the common phone rotations.
+_ORIENTATION_FILTER = {
+    1: None,
+    2: "hflip",
+    3: "transpose=1,transpose=1",
+    4: "vflip",
+    5: "hflip,transpose=2",
+    6: "transpose=1",
+    7: "hflip,transpose=1",
+    8: "transpose=2",
+}
 
 
 def find_ffmpeg() -> str:
@@ -162,13 +182,48 @@ def resolve_encoder(encoder: str, ffmpeg_exe: str) -> str:
     return "libx264"
 
 
+def _exif_orientation(path: Path) -> int:
+    """Return the EXIF orientation tag (1-8) for *path*, or 1 if absent/invalid."""
+    try:
+        with Image.open(path) as img:
+            value = img.getexif().get(_EXIF_ORIENTATION_TAG)
+            if isinstance(value, int) and 1 <= value <= 8:
+                return value
+    except Exception:
+        # Unreadable / corrupt metadata shouldn't block the render.
+        pass
+    return 1
+
+
+def _transpose_filter(path: Path, autorotate: bool) -> str | None:
+    """Return an ffmpeg filter prefix that uprights *path* per EXIF, or None."""
+    if not autorotate:
+        return None
+    orientation = _exif_orientation(path)
+    return _ORIENTATION_FILTER.get(orientation)
+
+
+def _escape_drawtext(text: str) -> str:
+    """Escape a caption so it is safe inside an ffmpeg drawtext ``text='...'``.
+
+    Inside a single-quoted filter value, the only character that needs
+    escaping is the single quote (written ``'\''``); ``%`` enables drawtext's
+    strftime expansion and must be escaped so literal percent signs render.
+    """
+    text = text.replace("%", "\\%")
+    text = text.replace("'", "'\\''")
+    return text
+
+
 def _per_input_filter(
     index: int,
     width: int,
     height: int,
-    delay: float,
     ken_burns: bool,
     out_format: str = "yuv420p",
+    caption: str | None = None,
+    transpose: str | None = None,
+    font_file: Path | None = None,
 ) -> str:
     """Scale-to-fit, pad with black bars, normalize pixel format + SAR.
 
@@ -176,7 +231,14 @@ def _per_input_filter(
     (via zoompan) so the motion happens within the source image before it is
     letterboxed into the target resolution. `out_format` is "yuv420p" for
     software encoders and "nv12,hwupload" for VAAPI (hardware frames).
+
+    `transpose` (an EXIF-derived filter prefix) uprights rotated phone photos,
+    and `caption` burns a bottom-centered text overlay onto the slide.
     """
+    prefix = ""
+    if transpose:
+        prefix = f"{transpose},"
+
     zoom = ""
     if ken_burns:
         # The input is a 1-frame-per-D-second still stream, so d=1 makes each
@@ -188,28 +250,54 @@ def _per_input_filter(
             f"d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
             f"fps={FPS},"
         )
+
+    caption_filter = ""
+    if caption:
+        safe = _escape_drawtext(caption)
+        fontsize = max(18, height // 20)
+        fontfile = f"fontfile='{Path(font_file).as_posix()}':" if font_file else ""
+        caption_filter = (
+            f",drawtext={fontfile}text='{safe}':fontcolor=white:"
+            f"fontsize={fontsize}:box=1:boxcolor=black@0.4:boxborderw=12:"
+            f"x=(w-text_w)/2:y=h-th-48"
+        )
+
     return (
-        f"[{index}:v]{zoom}scale=w={width}:h={height}:"
+        f"[{index}:v]{prefix}{zoom}scale=w={width}:h={height}:"
         f"force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"setsar=1,format={out_format}[v{index}]"
+        f"setsar=1{caption_filter},format={out_format}[v{index}]"
     )
+
+
+def _normalize_items(items: list[Path | MediaItem], default_duration: float) -> list[MediaItem]:
+    """Coerce a mix of ``Path``/``MediaItem`` inputs into uniform ``MediaItem``s."""
+    norm: list[MediaItem] = []
+    for it in items:
+        if isinstance(it, MediaItem):
+            norm.append(it)
+        else:
+            norm.append(MediaItem(path=Path(it), duration=default_duration))
+    return norm
 
 
 def build_command(
     config: Config,
-    images: list[Path],
+    items: list[Path | MediaItem],
     ffmpeg_exe: str = "ffmpeg",
     encoder: str | None = None,
 ) -> list[str]:
     """Construct the full ffmpeg command as a list of arguments.
 
+    `items` is a list of image paths or :class:`~slideshow.scanner.MediaItem`
+    objects (the latter allowing per-image duration/caption overrides).
     `ffmpeg_exe` defaults to "ffmpeg" (resolved via PATH at runtime) but can
     be injected, which keeps this function pure and testable. `encoder` is the
     *resolved* concrete encoder (callers pass the result of `resolve_encoder`),
     defaulting to `config.encoder`.
     """
-    if not images:
+    items = _normalize_items(items, config.delay_seconds)
+    if not items:
         raise RenderError("no images supplied to build_command.")
 
     enc = encoder or config.encoder
@@ -228,18 +316,33 @@ def build_command(
             raise RenderError("VAAPI requested but no /dev/dri/renderD* device found.")
         inputs += ["-vaapi_device", device]
 
-    for i, image in enumerate(images):
-        inputs += ["-loop", "1", "-t", str(config.delay_seconds), "-i", str(image)]
+    for i, item in enumerate(items):
+        inputs += ["-loop", "1", "-t", str(item.duration), "-i", str(item.path)]
+        transpose = _transpose_filter(item.path, config.autorotate)
         filters.append(
-            _per_input_filter(i, width, height, config.delay_seconds, config.ken_burns, out_format)
+            _per_input_filter(
+                i,
+                width,
+                height,
+                config.ken_burns,
+                out_format,
+                caption=item.caption,
+                transpose=transpose,
+                font_file=config.font_file,
+            )
         )
         labels.append(f"[v{i}]")
 
-    if config.transition == "crossfade" and len(images) > 1:
+    if config.transition == "crossfade" and len(items) > 1:
         chain = labels[0]
-        for j in range(1, len(images)):
-            offset = j * (config.delay_seconds - config.crossfade_seconds)
-            out_label = f"[x{j}]" if j < len(images) - 1 else "[vout]"
+        cumulative = 0.0
+        for j in range(1, len(items)):
+            cumulative += items[j - 1].duration
+            # Offset of the j-th transition in the running timeline. Each prior
+            # crossfade already shortened the timeline by crossfade_seconds, so
+            # we subtract j * F from the cumulative on-screen time.
+            offset = cumulative - j * config.crossfade_seconds
+            out_label = f"[x{j}]" if j < len(items) - 1 else "[vout]"
             filters.append(
                 f"{chain}{labels[j]}xfade=transition=fade:"
                 f"duration={config.crossfade_seconds}:offset={offset:.3f}{out_label}"
@@ -250,8 +353,28 @@ def build_command(
         # Single image: no transition possible, just map the normalized clip.
         map_label = "[v0]"
     else:
-        filters.append("".join(labels) + f"concat=n={len(images)}:v=1:a=0[vout]")
+        filters.append("".join(labels) + f"concat=n={len(items)}:v=1:a=0[vout]")
         map_label = "[vout]"
+
+    # Optional background audio: fit it to the video length, apply fades, and
+    # map it as a second output stream.
+    if config.audio_file is not None:
+        audio_index = len(items)
+        inputs += ["-i", str(config.audio_file)]
+        total = _total_duration_seconds(config, items)
+        chain_parts: list[str] = []
+        if config.audio_normalize:
+            chain_parts.append("loudnorm")
+        if config.audio_loop:
+            chain_parts.append("aloop=loop=-1:size=2147483647")
+        chain_parts.append("apad")
+        chain_parts.append(f"atrim=0:{total:.3f}")
+        chain_parts.append(f"afade=t=in:st=0:d={config.audio_fade_in:.3f}")
+        fade_out_start = max(0.0, total - config.audio_fade_out)
+        chain_parts.append(f"afade=t=out:st={fade_out_start:.3f}:d={config.audio_fade_out:.3f}")
+        if config.audio_volume != 1.0:
+            chain_parts.append(f"volume={config.audio_volume:.3f}")
+        filters.append(f"[{audio_index}:a]{','.join(chain_parts)}[aout]")
 
     command = [
         ffmpeg_exe,
@@ -260,6 +383,10 @@ def build_command(
         ";".join(filters),
         "-map",
         map_label,
+    ]
+    if config.audio_file is not None:
+        command += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-shortest"]
+    command += [
         "-c:v",
         enc,
         "-pix_fmt",
@@ -298,59 +425,58 @@ def _quality_args(config: Config, encoder: str) -> list[str]:
     return args
 
 
-def _total_duration_seconds(config: Config, n_images: int) -> float:
-    """Expected output duration in seconds for the given image count."""
-    if config.transition == "crossfade":
-        return n_images * config.delay_seconds - (n_images - 1) * config.crossfade_seconds
-    return n_images * config.delay_seconds
+def _total_duration_seconds(config: Config, items: list[Path | MediaItem]) -> float:
+    """Expected output duration in seconds for the given image items."""
+    durations = [it.duration if isinstance(it, MediaItem) else config.delay_seconds for it in items]
+    if config.transition == "crossfade" and len(durations) > 1:
+        return sum(durations) - (len(durations) - 1) * config.crossfade_seconds
+    return sum(durations)
 
 
 def render(
     config: Config,
-    images: list[Path],
+    items: list[Path | MediaItem],
     ffmpeg_exe: str | None = None,
     progress_callback: callable[[float], None] | None = None,
+    cancel_check: callable[[], bool] | None = None,
 ) -> list[str]:
     """Run ffmpeg to produce the video. Returns the command that was run.
 
     If `progress_callback` is provided, it is invoked with the encode progress
     as a float percentage (0-100) read from ffmpeg's `-progress` output. This
     is what lets the web UI show a live progress bar without blocking.
+
+    If `cancel_check` is provided, it is polled while encoding; when it returns
+    True the ffmpeg process is terminated and :class:`CancelError` is raised.
     """
     exe = ffmpeg_exe or find_ffmpeg()
     concrete = resolve_encoder(config.encoder, exe)
-    command = build_command(config, images, exe, encoder=concrete)
+    command = build_command(config, items, exe, encoder=concrete)
 
-    if progress_callback is None:
+    if progress_callback is None and cancel_check is None:
         proc = subprocess.run(command, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RenderError(_format_error(command, proc.stderr, proc.returncode))
         return command
 
-    # Progress mode: we ask ffmpeg to write machine-readable progress to a *file*
-    # (not a pipe -- piping progress can deadlock when the encode runs inside a
-    # background worker thread under an async event loop). The actual encode is
-    # executed with subprocess.run in a *dedicated* thread, which is robust in
-    # every threading context; this (calling) thread polls the progress file
-    # until the encode thread finishes.
-    total_ms = _total_duration_seconds(config, len(images)) * 1000.0
+    # Progress/cancel mode: we ask ffmpeg to write machine-readable progress to
+    # a *file* (not a pipe -- piping progress can deadlock when the encode runs
+    # inside a background worker thread under an async event loop). A lightweight
+    # poll thread reads that file and streams updates to the callback without
+    # blocking the calling thread, which runs the encode and watches for cancel.
+    total_ms = _total_duration_seconds(config, items) * 1000.0
 
     progress_path = Path(tempfile.mkstemp(suffix=".progress", prefix="slideshow_")[1])
     stderr_path = Path(tempfile.mkstemp(suffix=".stderr", prefix="slideshow_")[1])
 
     command = command + ["-progress", str(progress_path), "-nostats"]
 
-    # The encode itself runs in *this* (calling) thread via subprocess.run. We
-    # deliberately avoid forking ffmpeg from a nested thread, which can deadlock
-    # under CPython's fork-when-other-threads-hold-locks behavior. A separate,
-    # lightweight thread only polls the progress file (no subprocess) so it can
-    # stream updates to the callback without blocking this thread.
     done = threading.Event()
 
     def _poll_progress() -> None:
         while not done.wait(0.2):
             pct = _read_progress_file(progress_path, total_ms)
-            if pct is not None:
+            if pct is not None and progress_callback is not None:
                 try:
                     progress_callback(pct)
                 except Exception:
@@ -359,11 +485,24 @@ def render(
     poll_thread = threading.Thread(target=_poll_progress, daemon=True)
     poll_thread.start()
 
+    cancelled = False
+    returncode = 0
     try:
         with open(stderr_path, "w", encoding="utf-8", errors="replace") as err_fh:
-            returncode = subprocess.run(
-                command, stdout=subprocess.DEVNULL, stderr=err_fh
-            ).returncode
+            proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=err_fh)
+            while proc.poll() is None:
+                if cancel_check is not None and cancel_check():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    cancelled = True
+                    break
+                time.sleep(0.1)
+            if not cancelled:
+                returncode = proc.wait()
     finally:
         done.set()
         poll_thread.join()
@@ -374,7 +513,7 @@ def render(
 
     # Capture any final progress written in the tail of the encode.
     pct = _read_progress_file(progress_path, total_ms)
-    if pct is not None:
+    if pct is not None and progress_callback is not None:
         try:
             progress_callback(pct)
         except Exception:
@@ -390,12 +529,16 @@ def render(
     except OSError:
         pass
 
+    if cancelled:
+        raise CancelError("Render cancelled by user.")
+
     if returncode != 0:
         raise RenderError(_format_error(command, stderr_text, returncode))
-    try:
-        progress_callback(100.0)
-    except Exception:
-        pass
+    if progress_callback is not None:
+        try:
+            progress_callback(100.0)
+        except Exception:
+            pass
     return command
 
 
