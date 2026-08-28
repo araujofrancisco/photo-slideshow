@@ -10,18 +10,30 @@ services:
       - JOB_DIR=/app/jobs
       # Cap concurrent renders so the host/GPU isn't overloaded.
       - SLIDESHOW_MAX_WORKERS=2
+      # Expose the NVIDIA video-encode library (libnvidia-encode.so) inside the
+      # container so ffmpeg's h264_nvenc encoder actually works. Without "video"
+      # here the encode lib is never mounted and ffmpeg silently falls back to
+      # CPU (libx264) even though the GPU device is visible.
+      - NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
     volumes:
       - jobs_data:/app/jobs
     # GPU access: requires the NVIDIA Container Toolkit. With it, the app's
     # auto-detect uses h264_nvenc; without it, it falls back to libx264.
     # If you don't have the toolkit, remove the whole `deploy` block below to
     # run CPU-only.
+    #
+    # NOTE: We expose ALL GPUs (no `device_ids` pin). NVENC cannot open an
+    # encode session when the container only sees a non-zero device node
+    # (e.g. /dev/nvidia1 with no /dev/nvidia0) — it reports
+    # "No capable devices found". Exposing every GPU lets ffmpeg enumerate the
+    # encoder, and the app pins the actual encode to GPU 1 via ffmpeg's
+    # `-gpu 1` flag (see slideshow/ffmpeg.py), keeping the heavy card separate
+    # from whatever runs on GPU 0.
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
               capabilities: ["gpu"]
 
 volumes:

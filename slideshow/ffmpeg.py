@@ -100,6 +100,17 @@ ENCODER_PRESETS = {
     "h264_videotoolbox": None,  # VideoToolbox has no preset; uses sane defaults
 }
 
+# The host exposes two GTX 1070s. The slideshow container is launched with all
+# GPUs visible (see docker-compose.yml) so ffmpeg can enumerate the NVENC
+# encoder, but we keep the actual encode on GPU 1 to avoid disturbing whatever
+# runs on GPU 0. Index is the container-visible ffmpeg device index.
+NVENC_GPU_INDEX = 1
+
+
+def _is_nvenc(encoder: str) -> bool:
+    """True for any NVIDIA NVENC encoder name (h264/hevc/av1_nvenc)."""
+    return encoder.endswith("_nvenc")
+
 
 def _find_vaapi_device() -> str | None:
     import glob
@@ -391,6 +402,9 @@ def build_command(
         enc,
         "-pix_fmt",
         "yuv420p",  # required for broad player/QuickTime compatibility
+        # NVENC: pin the encode to the configured GPU so it doesn't land on
+        # whatever card GPU 0 is hosting.
+        *(["-gpu", str(NVENC_GPU_INDEX)] if _is_nvenc(enc) else []),
         *(["-preset", preset] if preset else []),
         *(_quality_args(config, enc)),
         "-movflags",
