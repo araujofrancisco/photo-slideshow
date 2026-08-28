@@ -7,6 +7,7 @@ serves the built Astro assets. No slideshow/ffmpeg logic lives here.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -91,6 +92,14 @@ async def create_render(
     resolution: str = Form("1920x1080"),
     ken_burns: bool = Form(False),
     encoder: str = Form("auto"),
+    audio: UploadFile | None = File(None, description="Optional background music file"),
+    audio_fade_in: float = Form(1.0),
+    audio_fade_out: float = Form(1.0),
+    audio_volume: float = Form(1.0),
+    audio_loop: bool = Form(False),
+    audio_normalize: bool = Form(False),
+    no_autorotate: bool = Form(False),
+    items: str | None = Form(None, description="JSON list of per-image {name,duration,caption}"),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
@@ -108,7 +117,25 @@ async def create_render(
         "resolution": resolution,
         "ken_burns": ken_burns,
         "encoder": encoder,
+        "audio_fade_in": audio_fade_in,
+        "audio_fade_out": audio_fade_out,
+        "audio_volume": audio_volume,
+        "audio_loop": audio_loop,
+        "audio_normalize": audio_normalize,
+        "no_autorotate": no_autorotate,
     }
+
+    # Optional per-image ordering/durations/captions manifest.
+    if items:
+        try:
+            parsed = json.loads(items)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid 'items' JSON.") from exc
+        if isinstance(parsed, dict):
+            parsed = parsed.get("items", [])
+        if not isinstance(parsed, list):
+            raise HTTPException(status_code=400, detail="'items' must be a JSON list.")
+        opts["items"] = parsed
 
     job = jobs.new_job(opts)
     in_dir = jobs.input_dir_path(job.id)
@@ -140,6 +167,23 @@ async def create_render(
                 dest.unlink(missing_ok=True)
                 continue
             saved += 1
+
+        # Optional background audio: validate and persist next to the images.
+        if audio is not None and audio.filename:
+            if not jobs.allowed_audio_extension(audio.filename):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported audio type: {audio.filename}",
+                )
+            audio_name = Path(audio.filename).name
+            audio_dest = in_dir / f"audio{audio_name and Path(audio_name).suffix}"
+            with open(audio_dest, "wb") as out_f:
+                while chunk := await audio.read(64 * 1024):
+                    out_f.write(chunk)
+            if audio_dest.stat().st_size == 0:
+                audio_dest.unlink(missing_ok=True)
+            else:
+                opts["audio_file"] = str(audio_dest)
     except HTTPException:
         jobs.delete(job.id)
         raise

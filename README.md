@@ -10,7 +10,16 @@ clear precedence.
 
 - Configurable per-image delay (default 5s).
 - Two transitions: `cut` (instant) and `crossfade` (configurable duration).
-- Letterbox scaling: mixed sizes/orientations are fit (preserving aspect
+- **Per-image control**: a manifest (`--manifest file.json`, or the web UI's
+  per-file fields) lets you set each image's on-screen duration and an optional
+  caption, and fixes the slide order.
+- **Captions**: burn an optional text overlay onto any image via the manifest
+  (`caption`) — rendered with a bundled font, no system font needed.
+- **EXIF auto-orient**: phone photos are uprighted automatically from their
+  EXIF orientation tag (`--no-autorotate` to disable).
+- **Audio track**: mux an optional background music file (`--audio`) with
+  fade-in/out, volume, optional looping, and optional loudness normalization.
+- **Letterbox scaling**: mixed sizes/orientations are fit (preserving aspect
   ratio) and padded with black bars into a uniform target resolution.
 - **Ken Burns**: optional subtle slow zoom/pan per image (`--ken-burns`).
 - **Hardware encoding**: `--encoder auto` (default) auto-detects the best
@@ -20,7 +29,8 @@ clear precedence.
   actually usable, not just compiled in.
 - Configuration via `.env` **and/or** CLI parameters.
 - Clean UX: friendly errors for missing FFmpeg, empty folders, bad options;
-  `--dry-run` to preview the FFmpeg command; non-zero exit codes on failure.
+  `--dry-run` to preview the FFmpeg command; a live progress bar in the CLI;
+  non-zero exit codes on failure.
 - H.264 / `yuv420p` / `+faststart` output for maximum player compatibility.
 
 ## Prerequisites
@@ -76,7 +86,15 @@ python -m slideshow --input-dir ./photos --output out.mp4 --dry-run
 | Crossfade (s)   | `--crossfade`    | `CROSSFADE_SECONDS`  | `1`          |
 | Resolution      | `--resolution`   | `RESOLUTION`         | `1920x1080`  |
 | Overwrite       | `--overwrite`    | `OVERWRITE`          | `false`      |
-| Ken Burns       | `--ken-burns`    | `KEN_BURNS`          | `false`      |
+| Ken Burns         | `--ken-burns`    | `KEN_BURNS`          | `false`      |
+| Audio file       | `--audio`        | `AUDIO_FILE`         | _(none)_     |
+| Audio fade in    | `--audio-fade-in`| `AUDIO_FADE_IN`      | `1.0`        |
+| Audio fade out   | `--audio-fade-out`| `AUDIO_FADE_OUT`    | `1.0`        |
+| Audio volume     | `--audio-volume` | `AUDIO_VOLUME`       | `1.0`        |
+| Audio loop       | `--audio-loop`   | `AUDIO_LOOP`         | `false`      |
+| Audio normalize  | `--audio-normalize`| `AUDIO_NORMALIZE`   | `false`      |
+| EXIF autorotate  | `--no-autorotate`| `AUTOROTATE`         | `true`       |
+| Per-image manifest| `--manifest`    | _(n/a)_              | _(none)_     |
 | Encoder         | `--encoder`      | `ENCODER`            | `auto`       |
 
 ## Project layout
@@ -197,10 +215,25 @@ docker compose up --build
 To run CPU-only on a GPU host, remove the `deploy.resources.reservations.devices`
 block from `docker-compose.yml`.
 
+## Per-image manifest
+
+For fine control over ordering, per-image duration, and captions, pass a JSON
+manifest (CLI: `--manifest file.json`; web: the per-file **Sec** and
+**Caption** fields). It is a list of entries matched by file name:
+
+```json
+[
+  { "name": "001.jpg", "duration": 6, "caption": "Beach day" },
+  { "name": "002.jpg", "duration": 4, "caption": "Sunset" }
+]
+```
+
+- `name` — the image file name in the input directory.
+- `duration` — seconds the image is shown (defaults to the global delay).
+- `caption` — optional text burned onto the image.
+
 ## Known limitations / next steps
 
-- One global delay (no per-image durations yet).
-- No audio track support yet.
 - HEIC/HEIF inputs require a non-free FFmpeg build (excluded for safety).
 - Job store is in-memory + on-disk; for multi-replica deployments swap it for
   Redis/Celery (the `web/jobs.py` interface stays the same).

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from web.app import app
 from web import jobs
+from web.app import app
+
+# Disable the per-IP rate limit so the test suite isn't throttled when it
+# issues many render requests in quick succession.
+app.state.limiter.enabled = False
 
 # Realistically sized 320x240 test image.
 PNG = (Path(__file__).parent / "fixtures" / "red.png").read_bytes()

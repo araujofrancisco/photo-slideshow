@@ -26,9 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from slideshow.config import Config, parse_resolution
-from slideshow.errors import SlideshowError
+from slideshow.errors import CancelError, SlideshowError
 from slideshow.ffmpeg import render
-from slideshow.scanner import SUPPORTED_EXTENSIONS, find_images
+from slideshow.scanner import SUPPORTED_EXTENSIONS, MediaItem, scan_items
 
 JOB_ROOT = Path(os.environ.get("JOB_DIR", "jobs")).resolve()
 JOB_ROOT.mkdir(parents=True, exist_ok=True)
@@ -165,6 +165,11 @@ store = JobStore(STORE_FILE)
 # Worker pool used to run ffmpeg off the request path.
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
+# Per-job cancel flags. ``run_job`` registers an Event; ``cancel`` sets it, and
+# the ffmpeg render polls it so the encode is actually terminated (not just
+# marked cancelled in the UI).
+_cancel_events: dict[str, threading.Event] = {}
+
 
 # --------------------------------------------------------------------------- #
 # Paths
@@ -191,6 +196,7 @@ def new_job(opts: dict[str, Any]) -> Job:
 def start(job_id: str, opts: dict[str, Any]) -> None:
     """Mark the job as processing and enqueue the render on the worker pool."""
     store.update(job_id, status="processing", options=opts)
+    _cancel_events[job_id] = threading.Event()
     executor.submit(run_job, job_id, opts)
 
 
@@ -198,22 +204,26 @@ def delete(job_id: str) -> bool:
     job = store.get(job_id)
     if job is None:
         return False
+    _cancel_events.pop(job_id, None)
     shutil.rmtree(JOB_ROOT / job_id, ignore_errors=True)
     store.remove(job_id)
     return True
 
 
 def cancel(job_id: str) -> bool:
-    """Mark a queued or processing job as cancelled.
+    """Mark a queued or processing job as cancelled and stop the ffmpeg encode.
 
-    The ffmpeg process (if running) will finish naturally since we use
-    subprocess.run in a thread, but the UI stops tracking it immediately.
+    Setting the job's cancel Event makes :func:`run_job` terminate the running
+    ffmpeg process (instead of only flipping the UI status).
     """
     job = store.get(job_id)
     if job is None:
         return False
     if job.status not in ("queued", "processing"):
         return False
+    event = _cancel_events.get(job_id)
+    if event is not None:
+        event.set()
     store.update(job_id, status="cancelled", error="Cancelled by user")
     return True
 
@@ -225,6 +235,7 @@ def _build_config(opts: dict[str, Any], in_dir: Path, out_file: Path) -> Config:
     ken_burns = kb is True or (
         isinstance(kb, str) and kb.strip().lower() in ("true", "on", "1", "yes")
     )
+    audio_file = opts.get("audio_file")
     cfg = Config(
         input_dir=in_dir,
         output_file=out_file,
@@ -238,21 +249,43 @@ def _build_config(opts: dict[str, Any], in_dir: Path, out_file: Path) -> Config:
         encoder=str(opts.get("encoder") or "auto"),
         bitrate=str(opts.get("bitrate") or "auto"),
         crf=int(opts.get("crf") or 23),
+        audio_file=Path(audio_file) if audio_file else None,
+        audio_fade_in=float(opts.get("audio_fade_in") or 1.0),
+        audio_fade_out=float(opts.get("audio_fade_out") or 1.0),
+        audio_volume=float(opts.get("audio_volume") or 1.0),
+        audio_loop=bool(opts.get("audio_loop") or False),
+        audio_normalize=bool(opts.get("audio_normalize") or False),
+        autorotate=not bool(opts.get("no_autorotate") or False),
     )
     cfg.validate()
     return cfg
+
+
+def _build_items(job_id: str, opts: dict[str, Any], default_duration: float) -> list[MediaItem]:
+    """Build the slide list for a job from its per-image options (if any)."""
+    in_dir = input_dir_path(job_id)
+    manifest = opts.get("items")
+    if manifest:
+        return scan_items(in_dir, manifest, default_duration=default_duration)
+    return scan_items(in_dir, default_duration=default_duration)
 
 
 def run_job(job_id: str, opts: dict[str, Any]) -> None:
     """Execute the render for ``job_id`` and update its status."""
     try:
         in_dir = input_dir_path(job_id)
-        images = find_images(in_dir)
         cfg = _build_config(opts, in_dir, output_path(job_id))
+        items = _build_items(job_id, opts, cfg.delay_seconds)
+        event = _cancel_events.get(job_id)
+
+        def _cancelled() -> bool:
+            return event is not None and event.is_set()
+
         render(
             cfg,
-            images,
+            items,
             progress_callback=lambda pct: store.update(job_id, progress=round(pct, 1)),
+            cancel_check=_cancelled,
         )
         store.update(
             job_id,
@@ -260,6 +293,9 @@ def run_job(job_id: str, opts: dict[str, Any]) -> None:
             progress=100.0,
             output_file=str(output_path(job_id)),
         )
+    except CancelError:
+        # Status already flipped to "cancelled" by cancel(); leave it.
+        store.update(job_id, progress=0.0)
     except SlideshowError as exc:
         store.update(job_id, status="error", error=str(exc))
     except Exception as exc:  # noqa: BLE001 - surface unexpected failures to UI
@@ -268,3 +304,21 @@ def run_job(job_id: str, opts: dict[str, Any]) -> None:
 
 def allowed_extension(filename: str) -> bool:
     return Path(filename).suffix.lower() in SUPPORTED_EXTENSIONS
+
+
+# Audio formats FFmpeg can decode for background music.
+AUDIO_EXTENSIONS = {
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".oga",
+    ".flac",
+    ".mp4",
+    ".mov",
+}
+
+
+def allowed_audio_extension(filename: str) -> bool:
+    return Path(filename).suffix.lower() in AUDIO_EXTENSIONS

@@ -1,5 +1,7 @@
 # Core (CLI + library)
 python-dotenv>=1.0
+Pillow>=10.0
+tqdm>=4.65
 
 # Web UI
 fastapi>=0.110

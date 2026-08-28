@@ -8,13 +8,17 @@ readable composition root.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+from pathlib import Path
+
+from tqdm import tqdm
 
 from .config import load_config
 from .errors import SlideshowError
 from .ffmpeg import build_command, find_ffmpeg, render, resolve_encoder
-from .scanner import find_images
+from .scanner import MediaItem, find_images, scan_items
 
 LOG = logging.getLogger("slideshow")
 
@@ -70,7 +74,91 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the ffmpeg command without executing it.",
     )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help="JSON file listing per-image {name, duration, caption} in order.",
+    )
+    parser.add_argument(
+        "--durations",
+        default=None,
+        help="Comma-separated per-image durations in seconds, e.g. '5,4,6'.",
+    )
+    parser.add_argument(
+        "--audio",
+        default=None,
+        help="Optional background audio file (music) to mux into the video.",
+    )
+    parser.add_argument(
+        "--audio-fade-in",
+        type=float,
+        default=None,
+        help="Audio fade-in duration in seconds (default 1).",
+    )
+    parser.add_argument(
+        "--audio-fade-out",
+        type=float,
+        default=None,
+        help="Audio fade-out duration in seconds (default 1).",
+    )
+    parser.add_argument(
+        "--audio-volume",
+        type=float,
+        default=None,
+        help="Audio volume multiplier (default 1.0).",
+    )
+    parser.add_argument(
+        "--audio-loop",
+        action="store_true",
+        help="Loop the audio to fill the whole video when it is shorter.",
+    )
+    parser.add_argument(
+        "--audio-normalize",
+        action="store_true",
+        help="Normalize audio loudness (loudnorm) before mixing.",
+    )
+    parser.add_argument(
+        "--no-autorotate",
+        action="store_true",
+        help="Disable EXIF auto-orientation (keep images as stored).",
+    )
+    parser.add_argument(
+        "--font-file",
+        default=None,
+        help="TTF font file used for caption overlays (default: bundled DejaVuSans).",
+    )
     return parser
+
+
+def _build_items(args, config):
+    """Resolve the list of MediaItem slides from CLI args + input directory."""
+    if args.manifest:
+        manifest_path = Path(args.manifest).expanduser()
+        if not manifest_path.is_file():
+            raise SlideshowError(f"manifest file not found: {manifest_path}")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SlideshowError(f"invalid manifest JSON: {exc}") from exc
+        if isinstance(manifest, dict):
+            manifest = manifest.get("items", [])
+        if not isinstance(manifest, list):
+            raise SlideshowError("manifest must be a list of items (or {'items': [...]}).")
+        return scan_items(config.input_dir, manifest, default_duration=config.delay_seconds)
+
+    if args.durations:
+        try:
+            durations = [float(x) for x in str(args.durations).split(",") if x.strip() != ""]
+        except ValueError as exc:
+            raise SlideshowError(f"invalid --durations: {exc}") from exc
+        images = find_images(config.input_dir)
+        if len(durations) != len(images):
+            raise SlideshowError(
+                f"--durations listed {len(durations)} values but found {len(images)} images."
+            )
+        return [MediaItem(path=p, duration=d) for p, d in zip(images, durations, strict=True)]
+
+    return scan_items(config.input_dir, default_duration=config.delay_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,24 +170,33 @@ def main(argv: list[str] | None = None) -> int:
         # Side effect kept at the boundary: ensure the output location exists.
         config.output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        images = find_images(config.input_dir)
+        items = _build_items(args, config)
         encoder = resolve_encoder(config.encoder, find_ffmpeg())
         LOG.info(
             "Rendering %d image(s): %ss each, transition=%s, encoder=%s -> %s",
-            len(images),
+            len(items),
             config.delay_seconds,
             config.transition,
             encoder,
             config.output_file,
         )
+        if config.audio_file is not None:
+            LOG.info("Background audio: %s", config.audio_file)
 
         if args.dry_run:
-            command = build_command(config, images, "ffmpeg", encoder=encoder)
+            command = build_command(config, items, "ffmpeg", encoder=encoder)
             LOG.info("Dry run — command that would execute:")
             print(" ".join(command))
             return 0
 
-        render(config, images)
+        def _progress(pct: float) -> None:
+            bar.update(max(0.0, pct - bar.n))
+
+        bar = tqdm(total=100, desc="Rendering", unit="%", unit_scale=False)
+        try:
+            render(config, items, progress_callback=_progress)
+        finally:
+            bar.close()
         LOG.info("Done: %s", config.output_file)
         return 0
 

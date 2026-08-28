@@ -341,6 +341,49 @@ button.primary:disabled {
   color: var(--muted, #94a3b8);
 }
 
+.file-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.file-meta-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.65rem;
+  color: var(--muted, #94a3b8);
+}
+
+.file-meta-field input {
+  width: 52px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #334155);
+  background: var(--bg, #0f172a);
+  color: var(--text, #e2e8f0);
+  font-size: 0.7rem;
+}
+
+.file-caption {
+  flex: 1;
+  min-width: 90px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #334155);
+  background: var(--bg, #0f172a);
+  color: var(--text, #e2e8f0);
+  font-size: 0.7rem;
+}
+
+.audio-row {
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
 .file-remove {
   position: absolute;
   top: 4px;

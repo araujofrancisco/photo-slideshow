@@ -23,3 +23,7 @@ class ConfigError(SlideshowError):
 
 class RenderError(SlideshowError):
     """Raised when an FFmpeg invocation fails."""
+
+
+class CancelError(SlideshowError):
+    """Raised when a render was cancelled (e.g. via a user cancel request)."""
