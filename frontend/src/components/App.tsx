@@ -19,6 +19,7 @@ interface Job {
     crossfade?: number;
     resolution?: string;
     ken_burns?: boolean;
+    autorotate?: boolean;
     encoder?: string;
     bitrate?: string;
     crf?: number;
@@ -48,6 +49,7 @@ function AppInner({ encoderChoices }: Props) {
   const [resolution, setResolution] = useState("1920x1080");
   const [resolutionPreset, setResolutionPreset] = useState("1920x1080");
   const [kenBurns, setKenBurns] = useState(false);
+  const [autorotate, setAutorotate] = useState(false);
   const [encoder, setEncoder] = useState("auto");
 
   // Background audio
@@ -218,6 +220,7 @@ function AppInner({ encoderChoices }: Props) {
     fd.append("crossfade", String(crossfade));
     fd.append("resolution", resolution);
     fd.append("ken_burns", String(kenBurns));
+    fd.append("no_autorotate", String(!autorotate));
     fd.append("encoder", encoder);
     if (audio) {
       fd.append("audio", audio);
@@ -380,6 +383,15 @@ function AppInner({ encoderChoices }: Props) {
               aria-label="Enable Ken Burns effect"
             />
             <span>Ken Burns</span>
+          </label>
+          <label className="field checkbox">
+            <input
+              type="checkbox"
+              checked={autorotate}
+              onChange={(e) => setAutorotate(e.target.checked)}
+              aria-label="Auto-rotate images using EXIF orientation"
+            />
+            <span>Auto-rotate (EXIF)</span>
           </label>
         </div>
 
@@ -545,7 +557,8 @@ function AppInner({ encoderChoices }: Props) {
                 <div className="job-meta">
                   <strong>{j.options.transition || "cut"}</strong> · {j.options.delay ?? 5}s ·{" "}
                   {j.options.resolution || "1920x1080"}
-                  {j.options.ken_burns ? " · KB" : ""} ·{" "}
+                  {j.options.ken_burns ? " · KB" : ""}
+                  {j.options.autorotate ? " · ROT" : " · no-rot"} ·{" "}
                   <span className={`status-badge status-${j.status}`} aria-label={`Status: ${j.status}`}>{j.status}</span>
                 </div>
                 <div className="job-time">{relativeTime(j.created_at)}</div>
