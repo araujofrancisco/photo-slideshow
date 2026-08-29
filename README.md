@@ -215,6 +215,34 @@ docker compose up --build
 To run CPU-only on a GPU host, remove the `deploy.resources.reservations.devices`
 block from `docker-compose.yml`.
 
+### GPU / NVENC notes
+
+Hardware encoding uses NVIDIA NVENC (`h264_nvenc`). A few things are wired
+deliberately and should **not** be "tidied" away, or GPU encoding silently
+falls back to CPU (or breaks outright):
+
+- **`NVIDIA_DRIVER_CAPABILITIES` must include `video`.** Without it the NVIDIA
+  encode library (`libnvidia-encode.so`) is never mounted into the container and
+  ffmpeg can't open an NVENC session. It is set in `docker-compose.yml`.
+- **All GPUs are exposed; the encode is pinned to GPU 1.** The compose file does
+  *not* use `device_ids: ["1"]`. Pinning a single GPU only exposes
+  `/dev/nvidia1` (no `/dev/nvidia0`), which makes NVENC report
+  *"No capable devices found"*. Instead, all GPUs are visible so ffmpeg can
+  enumerate the encoder, and the actual encode is pinned to GPU 1 via ffmpeg's
+  `-gpu 1` flag (`NVENC_GPU_INDEX` in `slideshow/ffmpeg.py`). Change that
+  constant if you want a different card.
+- **`nv-codec-headers` is pinned to the NVENC API your driver exposes.**
+  The Dockerfile pins tag `n13.0.19.1` (NVENC API 13.0) to match the host
+  driver. If you instead track `nv-codec-headers` `master`, ffmpeg compiles
+  against a newer NVENC API than the driver provides and fails at runtime with
+  *"Driver does not support the required nvenc API version"*. **Only bump this
+  pin when you upgrade the NVIDIA driver** — check the driver's NVENC API with
+  `nvidia-smi` / the release notes first.
+- **Image decoders are compiled in.** ffmpeg is built with `--enable-zlib`
+  (PNG) and `--enable-libwebp`; without them, PNG/JPEG inputs fail to decode.
+- **CPU fallback is automatic.** With no GPU attached, `--encoder auto` falls
+  back to `libx264`.
+
 ## Per-image manifest
 
 For fine control over ordering, per-image duration, and captions, pass a JSON
