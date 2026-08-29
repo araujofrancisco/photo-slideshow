@@ -4,6 +4,7 @@ services:
       context: .
       target: backend
     image: slideshow-web:latest
+    restart: unless-stopped
     ports:
       - "28000:8000"
     environment:
